@@ -951,6 +951,7 @@ def rgbd_slam(config: dict):
     print(f"Average Tracking/Frame Time: {tracking_frame_time_avg} s")
     print(f"Average Mapping/Iteration Time: {mapping_iter_time_avg*1000} ms")
     print(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s")
+    print(f"Total Number of Gaussians: {params['means3D'].shape[0]}")
     if config['use_wandb']:
         wandb_run.log({"Final Stats/Average Tracking Iteration Time (ms)": tracking_iter_time_avg*1000,
                        "Final Stats/Average Tracking Frame Time (s)": tracking_frame_time_avg,
