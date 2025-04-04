@@ -106,48 +106,40 @@ def report_loss(losses, wandb_run, wandb_step, tracking=False, mapping=False):
     return wandb_step
         
 
+# ku: eval crashes due to oom. replace matplotlib with opencv
 def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_sil_mask, diff_depth_l1,
                          psnr, depth_l1, fig_title, plot_dir=None, plot_name=None, 
                          save_plot=False, wandb_run=None, wandb_step=None, wandb_title=None, diff_rgb=None):
-    # Determine Plot Aspect Ratio
-    aspect_ratio = color.shape[2] / color.shape[1]
-    fig_height = 8
-    fig_width = 14/1.55
-    fig_width = fig_width * aspect_ratio
-    # Plot the Ground Truth and Rasterized RGB & Depth, along with Diff Depth & Silhouette
-    fig, axs = plt.subplots(2, 3, figsize=(fig_width, fig_height))
-    axs[0, 0].imshow(color.cpu().permute(1, 2, 0))
-    axs[0, 0].set_title("Ground Truth RGB")
-    axs[0, 1].imshow(depth[0, :, :].cpu(), cmap='jet', vmin=0, vmax=6)
-    axs[0, 1].set_title("Ground Truth Depth")
+    C, H, W = color.shape
     rastered_color = torch.clamp(rastered_color, 0, 1)
-    axs[1, 0].imshow(rastered_color.cpu().permute(1, 2, 0))
-    axs[1, 0].set_title("Rasterized RGB, PSNR: {:.2f}".format(psnr))
-    axs[1, 1].imshow(rastered_depth[0, :, :].cpu(), cmap='jet', vmin=0, vmax=6)
-    axs[1, 1].set_title("Rasterized Depth, L1: {:.2f}".format(depth_l1))
-    if diff_rgb is not None:
-        axs[0, 2].imshow(diff_rgb.cpu(), cmap='jet', vmin=0, vmax=6)
-        axs[0, 2].set_title("Diff RGB L1")
-    else:
-        axs[0, 2].imshow(presence_sil_mask, cmap='gray')
-        axs[0, 2].set_title("Rasterized Silhouette")
-    diff_depth_l1 = diff_depth_l1.cpu().squeeze(0)
-    axs[1, 2].imshow(diff_depth_l1, cmap='jet', vmin=0, vmax=6)
-    axs[1, 2].set_title("Diff Depth L1")
-    for ax in axs.flatten():
-        ax.axis('off')
-    fig.suptitle(fig_title, y=0.95, fontsize=16)
-    fig.tight_layout()
-    if save_plot:
-        save_path = os.path.join(plot_dir, f"{plot_name}.png")
-        plt.savefig(save_path, bbox_inches='tight')
+    H = H // 2
+    W = W // 2
+
+    max_depth = 6
+    figure = np.zeros((H * 2, W * 3, 3), dtype=np.uint8)
+    figure[:H, :W, :] = color.cpu().permute(1, 2, 0).numpy()[::2, ::2] * 255
+    figure[:H, W:2*W, :] = depth[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
+    figure[:H, 2*W:3*W, :] = presence_sil_mask[::2, ::2, None] * 255
+    figure[H:2*H, :W, :] = rastered_color.cpu().permute(1, 2, 0).numpy()[::2, ::2] * 255
+    figure[H:2*H, W:2*W, :] = rastered_depth[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
+    figure[H:2*H, 2*W:3*W, :] = diff_depth_l1[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
+
+    # write labels with cv2
+    cv2.putText(figure, "Ground Truth RGB", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Ground Truth Depth", (W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Rasterized Silhouette", (2*W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Rasterized RGB", (10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Rasterized Depth", (W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Diff Depth L1", (2*W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "PSNR: {:.2f}".format(psnr), (10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "L1: {:.4f}".format(depth_l1), (W + 10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.imwrite(os.path.join(plot_dir, f"{plot_name}.png"), figure[..., ::-1])
+    
     if wandb_run is not None:
         if wandb_step is None:
-            wandb_run.log({wandb_title: fig})
+            wandb_run.log({wandb_title: figure})
         else:
-            wandb_run.log({wandb_title: fig}, step=wandb_step)
-    plt.close()
-
+            wandb_run.log({wandb_title: figure}, step=wandb_step)
 
 def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
                     tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
