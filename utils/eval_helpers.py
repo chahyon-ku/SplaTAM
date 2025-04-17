@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
+from threading import Thread
 
 from SplaTAM.datasets.gradslam_datasets.geometryutils import relative_transformation
 from SplaTAM.utils.recon_helpers import setup_camera
@@ -19,6 +20,23 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from pytorch_msssim import ms_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
+
+
+def rotation_error(gt_w2c_list, est_w2c_list):
+    """
+    Compute the rotation error between the estimated and ground truth camera poses in degrees.
+    """
+    errors = []
+    for gt_w2c, est_w2c in zip(gt_w2c_list, est_w2c_list):
+        gt_rot = gt_w2c[:3, :3]
+        est_rot = est_w2c[:3, :3]
+        gt_rot_inv = torch.linalg.inv(gt_rot)
+        relative_rot = torch.matmul(est_rot, gt_rot_inv)
+        angle = torch.acos(torch.clamp((torch.trace(relative_rot) - 1) / 2, -1, 1))
+        angle_deg = torch.rad2deg(angle)
+        errors.append(angle_deg.item())
+    return errors
+
 
 def align(model, data):
     """Align two trajectories using the method of Horn (closed-form).
@@ -418,9 +436,11 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         os.makedirs(depth_dir, exist_ok=True)
 
     gt_w2c_list = []
+    threads = []
     for time_idx in tqdm(range(num_frames)):
          # Get RGB-D Data & Camera Parameters
         color, depth, intrinsics, pose = dataset[time_idx]
+        color, depth, intrinsics, pose = color.cuda(), depth.cuda(), intrinsics.cuda(), pose.cuda()
         gt_w2c = torch.linalg.inv(pose)
         gt_w2c_list.append(gt_w2c)
         intrinsics = intrinsics[:3, :3]
@@ -524,15 +544,22 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         plot_name = "%04d" % time_idx
         presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
         if wandb_run is None:
-            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir, 
-                                 plot_name=plot_name, save_plot=True)
+            # plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+            #                      psnr, depth_l1, fig_title, plot_dir, 
+            #                      plot_name=plot_name, save_plot=True)
+            threads.append(Thread(target=plot_rgbd_silhouette,
+                    args=(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                            psnr, depth_l1, fig_title, plot_dir, plot_name, True)
+            ))
+            threads[-1].start()
         elif wandb_save_qual:
             plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
                                  psnr, depth_l1, fig_title, plot_dir, 
                                  plot_name=plot_name, save_plot=True,
                                  wandb_run=wandb_run, wandb_step=None, 
                                  wandb_title="Eval/Qual Viz")
+
+    [t.join() for t in threads]
 
     try:
         # Compute the final ATE RMSE
@@ -558,7 +585,9 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         gt_w2c_list = valid_gt_w2c_list
         # Calculate ATE RMSE
         ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+        mean_rotation_error_deg = rotation_error(gt_w2c_list, latest_est_w2c_list)
         print("Final Average ATE RMSE: {:.2f} cm".format(ate_rmse*100))
+        print("Final Average Rotation Error: {:.2f} degrees".format(np.mean(mean_rotation_error_deg)))
         if wandb_run is not None:
             wandb_run.log({"Final Stats/Avg ATE RMSE": ate_rmse,
                         "Final Stats/step": 1})
